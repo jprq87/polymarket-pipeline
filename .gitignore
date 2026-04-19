@@ -1,0 +1,83 @@
+# ==============================================================================
+# SECRETS & CREDENTIALS
+# ==============================================================================
+*.json
+!package.json 
+.env
+.secret
+
+# ==============================================================================
+# PYTHON & VIRTUAL ENVIRONMENTS
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+env/
+venv/
+
+build/
+dist/
+wheels/
+*.egg-info
+
+# ==============================================================================
+# ORCHESTRATION & LOGS (BRUIN)
+# ==============================================================================
+.bruin.yml
+logs/
+*.log
+
+# ==============================================================================
+# TERRAFORM
+# ==============================================================================
+# Ignore the local metadata and binaries
+.terraform/
+
+# Ignore sensitive variables
+*.tfvars
+*.tfvars.json
+
+# Ignore state files
+*.tfstate
+*.tfstate.*
+
+# Ignore local execution plans (found in your tree)
+tfplan
+
+# Ignore logs
+crash.log
+crash.*.log
+
+# Ignore overrides
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Optional: Lock file (ignore if you want a clean repo, keep if you want strict versioning)
+.terraform.lock.hcl
+
+# ==============================================================================
+# DATA & TEMP FILES
+# ==============================================================================
+*.parquet
+*.csv
+data/
+tmp/
+
+# ==============================================================================
+# OS & EDITOR FILES
+# ==============================================================================
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# ==============================================================================
+# CUSTOM
+# ==============================================================================
+skip/
+logs/runs
+logs/*.log
