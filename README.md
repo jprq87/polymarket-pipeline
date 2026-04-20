@@ -16,6 +16,7 @@ An incremental batch pipeline that ingests, transforms, and visualizes Polymarke
 - [Data Warehouse Design](#data-warehouse-design)
 - [Dashboard](#dashboard)
 - [Project Structure](#project-structure)
+- [Cost & Scale Warning](#️-cost--scale-warning)
 - [Cloud Setup (from scratch)](#cloud-setup-from-scratch)
 - [Running Locally (clone & run)](#running-locally-clone--run)
 - [Makefile](#makefile)
@@ -330,6 +331,61 @@ Final_Project/
     ├── README.md
     └── uv.lock
 ```
+
+## Cost & Scale Warning
+
+This section exists to set honest expectations before you run the pipeline. The data involved is large, the BigQuery scans are expensive at full table scale, and a single unconstrained run can cost real money.
+
+---
+
+### Raw data volume (GCS)
+
+Each hourly Parquet file for a single day of Polymarket orderbook data is between **586 MB and 706 MB**. A full 24-hour day lands **~15 GB of raw Parquet** in GCS:
+
+![Volume](images/gcs.png)
+
+---
+
+### Row counts
+
+A single day loaded into `staging.stg_orderbook` produces roughly **750 million rows**:
+
+```sql
+SELECT COUNT(*)
+FROM `polymarket-pulse-2026.staging.stg_orderbook`
+WHERE timestamp_received >= TIMESTAMP("2026-03-14 00:00:00")
+  AND timestamp_received < TIMESTAMP("2026-03-15 00:00:00")
+```
+
+```
+749,939,667 rows
+```
+
+That is approximately **31 million rows per hour** on average. After 9 days of pipeline runs, `stg_orderbook` contains:
+
+| Metric | Value |
+|---|---|
+| Number of rows | 4,904,719,534 |
+| Number of partitions | 9 |
+| Total logical bytes | 2.13 TB |
+| Active logical bytes | 2.13 TB |
+| Current physical bytes | 93.06 GB |
+| Total physical bytes | 105.73 GB |
+| Time travel physical bytes | 12.67 GB |
+
+The gap between logical (2.13 TB) and physical (105.73 GB) bytes reflects BigQuery's columnar compression. The pipeline reads from this table constantly — every transform and quality check scans it — which is why partition pruning and clustering are non-negotiable for cost control.
+
+---
+
+### Cost per day
+
+Running the full pipeline for a single day costs approximately **$10–15 USD**  under BigQuery on-demand pricing ($6.25/TB scanned). The main cost drivers are:
+
+- `stg_price_changes`: scans one full date partition of `stg_orderbook` (~237 GB logical per day) to parse, filter, and flatten the JSON payload
+- Report assets: four fact tables each scan `stg_price_changes` for the target date
+- Quality checks: every `custom_check` query scans the loaded partition — these are scoped to `[start_date, end_date)` specifically to avoid billing for the full table
+
+Costs stay bounded as long as every WHERE clause leads with the partition column (`DATE(timestamp_received)` or `date`). Removing or bypassing a partition filter on any asset would scan the full 2.13 TB and cost ~$13 in a single query.
 
 ---
 
