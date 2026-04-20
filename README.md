@@ -1,4 +1,4 @@
-# 📊 Polymarket Pipeline
+# 📊 Polymarket Pulse
 
 An incremental batch pipeline that ingests, transforms, and visualizes Polymarket orderbook data to surface liquidity patterns, market sentiment, and trading activity across prediction market categories.
 
@@ -18,6 +18,7 @@ An incremental batch pipeline that ingests, transforms, and visualizes Polymarke
 - [Project Structure](#project-structure)
 - [Cloud Setup (from scratch)](#cloud-setup-from-scratch)
 - [Running Locally (clone & run)](#running-locally-clone--run)
+- [Makefile](#makefile)
 - [Reproducibility](#reproducibility)
 
 ---
@@ -96,6 +97,7 @@ Both files are stored in GCP Secret Manager and pulled at VM startup via `startu
 ![Architecture](images/architecture.png)
 
 External source: `https://r2.pmxt.dev/polymarket_orderbook_{YYYY-MM-DDTHH}.parquet`
+
 Polymarket Gamma API: `https://gamma-api.polymarket.com/markets`
 
 ---
@@ -250,19 +252,47 @@ Every asset carries both column-level checks (`not_null`, `positive`, `max`) and
 
 ## Dashboard
 
-The Looker Studio dashboard is split into two pages:
-
-**Macro View** — answers *where* activity happens:
-
-- Bar chart of daily tick volume by category (temporal distribution across categories)
-- Scorecard tiles: total markets tracked, total ticks processed, average spread
-
-**Liquidity View** — answers *how healthy* the platform is:
-
-- Line chart of hourly average spread over time (temporal spread trend)
-- 100% stacked bar chart of spread tier distribution by day (Tight / Medium / Wide)
+The dashboard is built in Looker Studio, connected directly to the BigQuery report tables. It is split into three sections, each answering a different question about the platform.
 
 > Dashboard link: *https://datastudio.google.com/s/kBEP_jNMOi4*
+
+---
+
+### Section 1 — Platform Macro View: Executive Summary
+
+**1. Global Platform Throughput (Daily Ticks)**
+Vertical bar chart showing total tick volume per day across all categories. Gives a top-level view of how active the platform is over time.
+- Source: `fct_daily_category_activity`
+
+**2. Category Dominance (Total Volume)**
+Vertical bar chart of daily tick volume with a category filter dropdown. Allows drilling into a single category to see how its activity compares across time.
+- Source: `fct_daily_category_activity`
+
+---
+
+### Section 2 — Ecosystem Health & Liquidity Trends
+
+**3. Ecosystem Liquidity Flows by Category**
+100% stacked area chart showing the relative share of tick volume per category over time. Reveals which categories are gaining or losing dominance on the platform.
+- Source: `fct_daily_category_activity`
+
+**4. Global Market Heartbeat (Hourly Spread Friction)**
+Combo chart overlaying average spread and tick count by hour. Shows the intraday rhythm of the platform — when markets are most active and how tight spreads are at each hour.
+- Source: `fct_spread_over_time`
+
+---
+
+### Section 3 — Market Microstructure & Deep Dive
+
+**5. Orderbook Quality Shifts (Spread Tiers)**
+100% stacked vertical bar chart bucketing daily spreads into three quality tiers: Tight (`< $0.02`), Medium (`$0.02–$0.05`), Wide (`> $0.05`). Tracks whether liquidity quality is improving or degrading over time.
+- Source: `fct_spread_distribution`
+
+**6. Individual Market Lifecycle (Price vs. Volume)**
+Combo chart showing YES average bid price and tick volume per day for a single market, selectable via a question filter dropdown. Useful for inspecting how a specific market's price evolves alongside its activity level.
+- Source: `fct_daily_market_history`
+
+![Dashboard](images/dashboard.png)
 
 ---
 
@@ -270,31 +300,28 @@ The Looker Studio dashboard is split into two pages:
 
 ```
 Final_Project/
-    ├── images
-    │   └── architecture.png
     ├── polymarket-pipeline
     │   ├── assets
     │   │   ├── ingestion
-    │   │   │   └── upload_to_gcs.py                      # GCS upload (raw layer)
+    │   │   │   └── upload_to_gcs.py                # GCS upload (raw layer)
     │   │   ├── reports
     │   │   │   ├── fct_daily_category_activity.asset.sql
     │   │   │   ├── fct_daily_market_history.asset.sql
     │   │   │   ├── fct_spread_distribution.asset.sql
     │   │   │   └── fct_spread_over_time.asset.sql
     │   │   └── staging
-    │   │       ├── fetch_markets.py                      # Gamma API → dim_markets
-    │   │       ├── stg_markets.asset.sql                 # Cleansed dimension view
-    │   │       ├── stg_orderbook.py                      # Parquet → BigQuery loader
-    │   │       └── stg_price_changes.asset.sql           # GCS → BigQuery loader
-    │   │       └── stg_price_changes.asset.sql           # Parquet JSON parsing & flattening
+    │   │       ├── fetch_markets.py                # Gamma API → dim_markets
+    │   │       ├── stg_markets.asset.sql           # Cleansed dimension view
+    │   │       ├── stg_orderbook.py                # GCS → BigQuery loader
+    │   │       └── stg_price_changes.asset.sql     # JSON parsing & flattening
     │   ├── scripts
-    │   │   └── check_parquet_files.py                    # Utility: validate GCS Parquet headers
-    │   ├── pipeline.yml                                  # Bruin pipeline config (schedule, start_date)
+    │   │   └── check_parquet_files.py              # Utility: validate GCS Parquet headers
+    │   ├── pipeline.yml                            # Bruin pipeline config (schedule, start_date)
     │   └── README.md
     ├── terraform
-    │   ├── main.tf                                       # All GCP infrastructure
+    │   ├── main.tf                                 # All GCP infrastructure
     │   ├── README.md
-    │   └── startup-script.sh                             # VM bootstrap (Docker install, secrets, cron)
+    │   └── startup-script.sh                       # VM bootstrap (Docker install, secrets, cron)
     ├── .dockerignore
     ├── .gitignore
     ├── .python-version
@@ -914,6 +941,124 @@ bq query --nouse_legacy_sql \
 ```
 
 **Via GCP Console:** Go to **BigQuery → Explorer → polymarket-pulse-2026 → reports** and preview any `fct_*` table. If all assets ran successfully, each report table should have rows for your target date.
+
+---
+
+## Makefile
+
+A `Makefile` is included at the repo root to avoid typing full `bruin run`, `docker`, `terraform`, and `gcloud` commands repeatedly. Run `make help` at any time to see all available targets.
+
+### Platform requirements
+
+The Makefile uses GNU `date` syntax (`date -d "+1 day"`) for computing the next-day end date. This works natively on Linux and WSL2, but **not in PowerShell or Command Prompt**.
+
+**On Windows, run all `make` commands from WSL2 or Git Bash**, not from a native Windows terminal:
+
+```bash
+# WSL2 (recommended)
+wsl
+make run
+
+# Git Bash
+make run
+```
+
+If you need to run pipeline commands directly from PowerShell without WSL, a PowerShell equivalent is included below.
+
+<details>
+<summary>PowerShell equivalents (no WSL)</summary>
+
+```powershell
+# Run pipeline for today
+$today = Get-Date -Format "yyyy-MM-dd"
+$tomorrow = (Get-Date).AddDays(1).ToString("yyyy-MM-dd")
+bruin run ./polymarket-pipeline --start-date $today --end-date $tomorrow --environment dev
+
+# Backfill
+bruin run ./polymarket-pipeline --start-date "2026-03-14" --end-date "2026-03-20" --environment dev
+
+# Single asset
+bruin run ./polymarket-pipeline/assets/ingestion/upload_to_gcs.py `
+  --start-date "2026-03-14" --end-date "2026-03-15" --environment dev
+
+# Docker run
+$today = Get-Date -Format "yyyy-MM-dd"
+$tomorrow = (Get-Date).AddDays(1).ToString("yyyy-MM-dd")
+docker run --rm `
+  -v "${PWD}/.bruin.yml:/app/.bruin.yml:ro" `
+  -v "${PWD}/polymarket-sa.json:/app/bruin_gcp.json:ro" `
+  -v "${PWD}/logs:/app/logs" `
+  jprq/polymarket-pipeline:latest `
+  --environment prod --start-date $today --end-date $tomorrow
+
+# Upload secrets
+gcloud secrets versions add bruin-gcp-credentials --data-file=./polymarket-sa.json --project=polymarket-pulse-2026
+gcloud secrets versions add bruin-yml-config --data-file=./.bruin.yml --project=polymarket-pulse-2026
+
+# SSH into VM
+gcloud compute ssh polymarket-docker-host --zone=us-central1-a
+
+# Tail cron log
+gcloud compute ssh polymarket-docker-host --zone=us-central1-a --command="tail -f /var/log/pipeline-cron.log"
+```
+
+</details>
+
+### Command reference
+
+#### Local development
+
+| Command | Description |
+|---|---|
+| `make install` | Install Python dependencies via `uv sync --frozen` |
+| `make validate` | Validate all pipeline assets without running them |
+| `make run` | Run the full pipeline for today |
+| `make run DATE=2026-03-14` | Run the full pipeline for a specific date |
+| `make backfill START=2026-03-14 END=2026-03-20` | Backfill a date range |
+| `make asset PATH=assets/ingestion/upload_to_gcs.py` | Run a single asset for today |
+| `make asset PATH=assets/... DATE=2026-03-14` | Run a single asset for a specific date |
+
+#### Docker
+
+| Command | Description |
+|---|---|
+| `make docker-build` | Build the Docker image locally |
+| `make docker-push` | Push the image to Docker Hub |
+| `make docker-run` | Run the pipeline in Docker using prod credentials (today) |
+| `make docker-run DATE=2026-03-14` | Run the pipeline in Docker for a specific date |
+
+#### Infrastructure
+
+| Command | Description |
+|---|---|
+| `make tf-init` | Initialize Terraform |
+| `make tf-plan` | Preview infrastructure changes |
+| `make tf-apply` | Apply infrastructure changes |
+| `make tf-destroy` | Destroy all infrastructure (asks for confirmation) |
+
+#### Secrets
+
+| Command | Description |
+|---|---|
+| `make upload-secrets` | Upload `polymarket-sa.json` + `.bruin.yml` to Secret Manager |
+| `make rotate-credentials` | Upload new key and re-fetch it on the VM without a reset |
+
+#### VM
+
+| Command | Description |
+|---|---|
+| `make ssh` | SSH into the pipeline VM |
+| `make logs` | Tail the cron log on the VM in real time |
+| `make vm-stop` | Stop the VM (saves compute cost, disk is retained) |
+| `make vm-start` | Start the VM (cron resumes, startup script does not re-run) |
+| `make vm-reset` | Reset the VM and re-run the startup script |
+
+#### Verify
+
+| Command | Description |
+|---|---|
+| `make check-gcs DATE=2026-03-14` | List GCS files for a date partition |
+| `make check-bq DATE=2026-03-14` | Count rows in `stg_orderbook` for a date |
 
 ---
 

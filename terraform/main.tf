@@ -24,10 +24,10 @@
 
 locals {
   # Identity
-  pipeline_sa_email = ""
+  pipeline_sa_email = "polymarket-sa@polymarket-pulse-2026.iam.gserviceaccount.com"
 
   # Project
-  project_id        = ""
+  project_id        = "polymarket-pulse-2026"
   zone              = "us-central1-a"
   region            = "us-central1"
   bq_location       = "US-CENTRAL1"  # Must match existing datasets and bucket
