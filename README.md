@@ -379,7 +379,7 @@ The gap between logical (2.13 TB) and physical (105.73 GB) bytes reflects BigQue
 
 ### Cost per day
 
-Running the full pipeline for a single day costs approximately **$10–15 USD**  under BigQuery on-demand pricing ($6.25/TB scanned). The main cost drivers are:
+Running the full pipeline for a single day costs approximately **$10–15 USD** under BigQuery on-demand pricing ($6.25/TB scanned). The main cost drivers are:
 
 - `stg_price_changes`: scans one full date partition of `stg_orderbook` (~237 GB logical per day) to parse, filter, and flatten the JSON payload
 - Report assets: four fact tables each scan `stg_price_changes` for the target date
