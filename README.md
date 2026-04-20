@@ -16,7 +16,7 @@ An incremental batch pipeline that ingests, transforms, and visualizes Polymarke
 - [Data Warehouse Design](#data-warehouse-design)
 - [Dashboard](#dashboard)
 - [Project Structure](#project-structure)
-- [Cost & Scale Warning](#️-cost--scale-warning)
+- [Cost & Scale Warning](#cost--scale-warning)
 - [Cloud Setup (from scratch)](#cloud-setup-from-scratch)
 - [Running Locally (clone & run)](#running-locally-clone--run)
 - [Makefile](#makefile)
