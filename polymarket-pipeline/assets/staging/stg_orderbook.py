@@ -9,6 +9,8 @@ description: >
   reloads — safe to re-run. Handles both daily scheduled runs (single date) and
   multi-day backfills (date range) without any external scripts.
   Source: gs://polymarket-raw-parquet/raw/orderbook/date={date}/*.parquet
+  Grain: one row per token per orderbook event. Binary markets produce two rows
+  per event (YES token + NO token), so row count is ~2x event count.
 secrets:
   - key: bruin_gcp
 depends:
@@ -29,7 +31,25 @@ columns:
     description: "Either price_change or book_snapshot"
   - name: data
     type: string
-    description: "Raw JSON payload from the orderbook"
+    description: >
+      Raw JSON payload from the orderbook. For price_change rows the object
+      contains: update_type (string), market_id (hex condition ID), token_id
+      (integer string), side (YES|NO), best_bid (decimal string), best_ask
+      (decimal string), timestamp (float unix), change_price (decimal string),
+      change_size (integer string), change_side (BUY|SELL).
+      book_snapshot rows have a different shape — an array of price levels.
+      Parsed downstream in stg_price_changes via JSON_VALUE().
+      Example (price_change, YES side):
+        {"update_type": "price_change",
+         "market_id": "0x00000977...ff707",
+         "token_id": "44554681...248",
+         "side": "YES",
+         "best_bid": "0.014",
+         "best_ask": "0.016",
+         "timestamp": 1773446521.696,
+         "change_price": "0.189",
+         "change_size": "0",
+         "change_side": "SELL"}
 
 custom_checks:
   - name: no partitions are empty after load

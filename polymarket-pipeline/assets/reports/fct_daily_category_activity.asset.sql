@@ -2,7 +2,14 @@
 name: reports.fct_daily_category_activity
 type: bq.sql
 connection: bruin_gcp
-description: "Aggregates daily market activity, volume (ticks), and average bid-ask spreads grouped by category. Serves as the primary data source for the Looker Studio Macro View dashboard."
+description: >
+  Aggregates daily market activity, volume (ticks), and average bid-ask spreads
+  grouped by category. Serves as the primary data source for the Looker Studio
+  Macro View dashboard.
+  Grain: one row per (date, category). A market with no matching row in
+  stg_markets lands in 'Unknown / Deleted' via the LEFT JOIN COALESCE — this
+  preserves tick volume from markets that were active but later removed or
+  never resolved by the Gamma API.
 materialization:
   type: table
   strategy: delete+insert
@@ -22,7 +29,11 @@ columns:
       - name: not_null
   - name: category
     type: string
-    description: "Market category name from dim_markets"
+    description: >
+      Market category from stg_markets. 'Unknown / Deleted' if the market_id
+      had no match in stg_markets (ghost markets filtered upstream, but markets
+      with late or missing metadata still fall through here via the LEFT JOIN).
+      Never NULL — COALESCE enforced in SELECT.
     checks:
       - name: not_null
   - name: market_count

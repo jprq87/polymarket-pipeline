@@ -2,7 +2,14 @@
 name: reports.fct_spread_distribution
 type: bq.sql
 connection: bruin_gcp
-description: "Categorizes daily bid-ask spreads into discrete quality tiers (Tight, Medium, Wide). Powers the 100% Stacked Bar Chart for liquidity quality tracking."
+description: >
+  Categorizes daily bid-ask spreads into discrete quality tiers (Tight, Medium,
+  Wide). Powers the 100% Stacked Bar Chart for liquidity quality tracking.
+  Grain: one row per (date, spread_tier) — maximum 3 rows per date. Tiers are
+  prefixed with 1., 2., 3. to force correct sort order in Looker Studio, which
+  sorts string axes lexicographically.
+  Spread bounds: filtered to [0, 1] before bucketing — inverted or out-of-range
+  spreads from stg_price_changes are excluded.
 materialization:
   type: table
   strategy: delete+insert
@@ -19,7 +26,14 @@ columns:
       - name: not_null
   - name: spread_tier
     type: string
-    description: "Categorical bucket representing the quality of the spread (Tight, Medium, Wide)."
+    description: >
+      Liquidity quality bucket. Exactly one of:
+        '1. Tight (< $0.02)'     spread <= 0.02
+        '2. Medium ($0.02 - $0.05)'  spread <= 0.05
+        '3. Wide (> $0.05)'      spread > 0.05
+      Prefixed with 1./2./3. to enforce sort order in Looker Studio.
+      Never NULL — all rows in stg_price_changes with spread >= 0 fall into
+      exactly one tier.
     checks:
       - name: not_null
   - name: tick_count

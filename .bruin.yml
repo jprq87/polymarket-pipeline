@@ -1,0 +1,24 @@
+default_environment: dev
+
+environments:
+  dev:
+    connections:
+      google_cloud_platform:
+        - name: "bruin_gcp"
+          service_account_file: "./bruin_gcp.json"
+          project_id: "de-final-project-jprq"
+          location: "us-central1"
+      gcs:
+        - name: "bruin_gcs"
+          service_account_file: "./bruin_gcp.json"
+
+  prod:
+    connections:
+      google_cloud_platform:
+        - name: "bruin_gcp"
+          service_account_file: "./bruin_gcp.json"
+          project_id: "de-final-project-jprq"
+          location: "us-central1"
+      gcs:
+        - name: "bruin_gcs"
+          service_account_file: "./bruin_gcp.json"

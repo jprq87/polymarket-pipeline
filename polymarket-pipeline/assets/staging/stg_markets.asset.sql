@@ -2,7 +2,13 @@
 name: staging.stg_markets
 type: bq.sql
 connection: bruin_gcp
-description: "Cleansed dimension view over staging.dim_markets. Filters out ghost markets and applies COALESCE defaults for categorical fields. Serves as the primary join key for downstream reporting assets."
+description: >
+  Cleansed dimension view over staging.dim_markets. Filters out ghost markets
+  and applies COALESCE defaults for categorical fields. Serves as the primary
+  join key for downstream reporting assets.
+  Grain: one row per market_id — ghost markets (is_ghost = TRUE) are excluded,
+  so row count will be less than dim_markets. All four report assets join against
+  this view, never against dim_markets directly.
 materialization:
   type: view
 depends:
@@ -23,7 +29,11 @@ columns:
     description: "Title of the parent event this market belongs to, from events[0].title in the Gamma API response"
   - name: category
     type: string
-    description: "Series title from the Gamma API (events[0].series[0].title). Defaulted to 'Unknown' via COALESCE for markets with no series."
+    description: >
+      Canonical category label inherited from dim_markets. One of: Politics,
+      Finance, Crypto, Sports, Games, Tech, Culture, Geopolitics. COALESCE
+      defaults NULL to 'Unknown'. Never NULL in this view.
+      Example: "Politics"
   - name: category_slug
     type: string
     description: "URL slug for the market, sourced from the Gamma API slug field. Defaulted to 'unknown' via COALESCE."

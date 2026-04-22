@@ -2,7 +2,13 @@
 name: staging.stg_price_changes
 type: bq.sql
 connection: bruin_gcp
-description: "Incrementally parses, flattens, and type-casts price change events from the raw JSON orderbook data. Applies strict data quality shields to filter out invalid or inverted spreads."
+description: >
+  Incrementally parses, flattens, and type-casts price change events from the
+  raw JSON orderbook data. Applies strict data quality shields to filter out
+  invalid or inverted spreads.
+  Grain: one row per token per price_change event. Binary markets produce two
+  rows per event (YES + NO sides). Filtered to update_type = 'price_change' only
+  — book_snapshot rows are excluded.
 materialization:
   type: table
   strategy: delete+insert
@@ -34,7 +40,7 @@ columns:
     description: "Best ask price, represented as a probability"
   - name: spread
     type: float
-    description: "Ask minus bid — mathematically defined in query"
+    description: "best_ask minus best_bid, in probability units [0, 1]. Inverted markets (ask < bid) are filtered out in the WHERE clause before this is computed."
   - name: change_size
     type: float
     description: "Magnitude of the orderbook size update"

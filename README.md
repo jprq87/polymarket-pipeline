@@ -1,22 +1,24 @@
-# 📊 Polymarket Pulse
+# 📊 Polymarket Pipeline
 
-An incremental batch pipeline that ingests, transforms, and visualizes Polymarket orderbook data to surface liquidity patterns, market sentiment, and trading activity across prediction market categories.
+A production-grade, fully cloud-native incremental batch data pipeline engineered to transform massive-scale prediction market data into actionable intelligence. The system seamlessly ingests and transforms 15 GB of raw Parquet orderbook data (750 million rows) daily across 1,000+ active Polymarket markets—uncovering deep liquidity patterns, market sentiment, and cross-category trading dynamics.
+
+To achieve this scale, the entire pipeline is orchestrated by Bruin and runs natively in the cloud on a Compute Engine VM, triggered by a daily cron job. All foundational infrastructure—including the VM, Secret Manager, GCS buckets, and BigQuery datasets—is provisioned declaratively via Terraform. During execution, raw Parquet files are extracted and staged in Google Cloud Storage, then loaded into BigQuery where all downstream SQL transformations and aggregations are processed.
 
 ---
 
 ## 📋 Table of Contents
 
 - [Problem Statement](#problem-statement)
-- [Engineering Challenges & Design Decisions](#engineering-challenges--design-decisions)
 - [Architecture](#architecture)
 - [Technologies](#technologies)
 - [Why BigQuery Instead of Spark?](#why-bigquery-instead-of-spark)
+- [Engineering Challenges & Design Decisions](#engineering-challenges--design-decisions)
 - [Dataset & Data Structure](#dataset--data-structure)
 - [Pipeline Overview](#pipeline-overview)
 - [Data Warehouse Design](#data-warehouse-design)
 - [Dashboard](#dashboard)
-- [Project Structure](#project-structure)
 - [Cost & Scale Warning](#cost--scale-warning)
+- [Project Structure](#project-structure)
 - [Cloud Setup (from scratch)](#cloud-setup-from-scratch)
 - [Running Locally (clone & run)](#running-locally-clone--run)
 - [Makefile](#makefile)
@@ -32,7 +34,7 @@ The raw data exists but is hard to reason about at scale: it arrives as hourly P
 
 This project builds an end-to-end batch data pipeline that:
 
-- Pulls raw hourly orderbook Parquet files from a public archive (https://r2.pmxt.dev)
+- Pulls raw hourly orderbook Parquet files from a public archive (https://archive.pmxt.dev/Polymarket)
 - Lands them in a GCS data lake, partitioned by date
 - Ingests them into BigQuery with partition-level idempotency
 - Parses the nested JSON payload and transforms it into typed, structured fact tables
@@ -40,6 +42,50 @@ This project builds an end-to-end batch data pipeline that:
 - Powers a Looker Studio dashboard that answers two core questions:
   - **Where is activity concentrated?** Category-level market counts, tick volumes, and average spreads by day
   - **How liquid is the platform?** Hourly spread time series and spread-tier distribution over time
+
+---
+
+## Architecture
+
+![Architecture](images/architecture.png)
+
+External source: `https://r2.pmxt.dev/polymarket_orderbook_{YYYY-MM-DDTHH}.parquet`
+
+Polymarket Gamma API: `https://gamma-api.polymarket.com/markets`
+
+---
+
+## Technologies
+
+| Layer                | Tool                                             | Notes                                                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Cloud**            | Google Cloud Platform                            | GCS, BigQuery, Secret Manager, Compute Engine                                                                                                                                                                         |
+| **IaC**              | Terraform                                        | Manages all GCP resources declaratively — bucket, datasets, VM, IAM bindings, secrets                                                                                                                                 |
+| **Orchestration**    | [Bruin CLI](https://bruin-data.github.io/bruin/) | Asset-based pipeline orchestrator. Defines assets (SQL or Python), resolves the DAG, injects secrets, runs data quality checks, and handles incremental strategies natively — without a persistent scheduler process. |
+| **Data Lake**        | Google Cloud Storage                             | Raw Parquet files partitioned by `date={YYYY-MM-DD}`                                                                                                                                                                  |
+| **Data Warehouse**   | BigQuery                                         | Staging and reports datasets, serverless — no cluster management                                                                                                                                                      |
+| **Transformations**  | Bruin SQL assets (BigQuery dialect)              | Incremental `delete+insert`, partitioned and clustered tables                                                                                                                                                         |
+| **Containerization** | Docker + uv                                      | Reproducible runtime; uv manages the Python virtual environment via a lockfile                                                                                                                                        |
+| **Dashboard**        | Looker Studio                                    | Connected directly to BigQuery report tables                                                                                                                                                                          |
+| **Python env**       | [uv](https://github.com/astral-sh/uv)            | Fast, lock-file-based package manager — replaces pip + venv                                                                                                                                                           |
+
+---
+
+## Why BigQuery Instead of Spark?
+
+The course covers Spark as the primary batch processing engine, and Spark would technically work here. But several properties of this specific pipeline make BigQuery the better fit:
+
+**The transformation logic is SQL-native.** Every transformation in this pipeline — JSON parsing, type casting, aggregation, spread bucketing, Pearson correlation — maps naturally to SQL. Spark's main advantage (distributed in-memory processing with a rich DataFrame API) adds complexity without benefit when the logic is already expressible in clean SQL clauses.
+
+**The data volume doesn't justify a cluster.** A full day of Polymarket orderbook data is on the order of tens of millions of rows. This is large enough that in-process Pandas would struggle, but well within the range where BigQuery's serverless engine handles it cheaply — without provisioning, sizing, or managing a Spark cluster.
+
+**Operational simplicity.** Spark requires either a managed cluster (Dataproc, EMR) or a self-managed one, both of which add infrastructure to maintain, monitor, and pay for whether or not the pipeline is running. BigQuery is serverless: it bills per byte scanned, costs nothing when idle, and requires zero cluster management.
+
+**Native integration with GCS and the rest of GCP.** The pipeline already lives on GCP. BigQuery reads directly from GCS Parquet files via `LOAD DATA`, connects natively to Looker Studio, and uses the same service account IAM model as every other resource in the project. Introducing Spark would add a separate auth surface and a separate data movement step.
+
+**Cost predictability at this scale.** With aggressive partition pruning and clustering, every daily run scans only the target date's data. The per-query cost is small, deterministic, and controlled entirely by the WHERE clause — something that's harder to guarantee with Spark's execution model on on-demand infrastructure.
+
+The one scenario where Spark would win is if this pipeline needed to run complex iterative algorithms (graph processing, ML feature engineering, multi-pass joins across massive denormalized tables) that BigQuery SQL cannot express efficiently. That is not this pipeline.
 
 ---
 
@@ -87,53 +133,9 @@ BigQuery on-demand pricing bills per byte scanned. A pipeline that runs full-tab
 
 ### Credentials in a cloud-native environment
 
-The pipeline runs inside a Docker container on a Compute VM. The container needs two files at runtime: `bruin_gcp.json` (the service account key) and `.bruin.yml` (the Bruin connection config). Baking either into the Docker image would embed credentials in a registry layer — a serious security risk. Storing them on the VM disk requires manual setup and breaks reproducibility.
+The pipeline runs inside a Docker container on a Compute VM. The container needs two files at runtime: `polymarket-sa.json` (the service account key) and `.bruin.yml` (the Bruin connection config). Baking either into the Docker image would embed credentials in a registry layer — a serious security risk. Storing them on the VM disk requires manual setup and breaks reproducibility.
 
 Both files are stored in GCP Secret Manager and pulled at VM startup via `startup-script.sh`. The VM authenticates to Secret Manager using its attached service account identity (ADC), so no bootstrap credentials are needed. A new VM provisioned by Terraform is fully operational after a single `terraform apply`, with no manual file placement.
-
----
-
-## Architecture
-
-![Architecture](images/architecture.png)
-
-External source: `https://r2.pmxt.dev/polymarket_orderbook_{YYYY-MM-DDTHH}.parquet`
-
-Polymarket Gamma API: `https://gamma-api.polymarket.com/markets`
-
----
-
-## Technologies
-
-| Layer                | Tool                                             | Notes                                                                                                                                                                                                                 |
-| -------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Cloud**            | Google Cloud Platform                            | GCS, BigQuery, Secret Manager, Compute Engine                                                                                                                                                                         |
-| **IaC**              | Terraform                                        | Manages all GCP resources declaratively — bucket, datasets, VM, IAM bindings, secrets                                                                                                                                 |
-| **Orchestration**    | [Bruin CLI](https://bruin-data.github.io/bruin/) | Asset-based pipeline orchestrator. Defines assets (SQL or Python), resolves the DAG, injects secrets, runs data quality checks, and handles incremental strategies natively — without a persistent scheduler process. |
-| **Data Lake**        | Google Cloud Storage                             | Raw Parquet files partitioned by `date={YYYY-MM-DD}`                                                                                                                                                                  |
-| **Data Warehouse**   | BigQuery                                         | Staging and reports datasets, serverless — no cluster management                                                                                                                                                      |
-| **Transformations**  | Bruin SQL assets (BigQuery dialect)              | Incremental `delete+insert`, partitioned and clustered tables                                                                                                                                                         |
-| **Containerization** | Docker + uv                                      | Reproducible runtime; uv manages the Python virtual environment via a lockfile                                                                                                                                        |
-| **Dashboard**        | Looker Studio                                    | Connected directly to BigQuery report tables                                                                                                                                                                          |
-| **Python env**       | [uv](https://github.com/astral-sh/uv)            | Fast, lock-file-based package manager — replaces pip + venv                                                                                                                                                           |
-
----
-
-## Why BigQuery Instead of Spark?
-
-The course covers Spark as the primary batch processing engine, and Spark would technically work here. But several properties of this specific pipeline make BigQuery the better fit:
-
-**The transformation logic is SQL-native.** Every transformation in this pipeline — JSON parsing, type casting, aggregation, spread bucketing, Pearson correlation — maps naturally to SQL. Spark's main advantage (distributed in-memory processing with a rich DataFrame API) adds complexity without benefit when the logic is already expressible in clean SQL clauses.
-
-**The data volume doesn't justify a cluster.** A full day of Polymarket orderbook data is on the order of tens of millions of rows. This is large enough that in-process Pandas would struggle, but well within the range where BigQuery's serverless engine handles it cheaply — without provisioning, sizing, or managing a Spark cluster.
-
-**Operational simplicity.** Spark requires either a managed cluster (Dataproc, EMR) or a self-managed one, both of which add infrastructure to maintain, monitor, and pay for whether or not the pipeline is running. BigQuery is serverless: it bills per byte scanned, costs nothing when idle, and requires zero cluster management.
-
-**Native integration with GCS and the rest of GCP.** The pipeline already lives on GCP. BigQuery reads directly from GCS Parquet files via `LOAD DATA`, connects natively to Looker Studio, and uses the same service account IAM model as every other resource in the project. Introducing Spark would add a separate auth surface and a separate data movement step.
-
-**Cost predictability at this scale.** With aggressive partition pruning and clustering, every daily run scans only the target date's data. The per-query cost is small, deterministic, and controlled entirely by the WHERE clause — something that's harder to guarantee with Spark's execution model on on-demand infrastructure.
-
-The one scenario where Spark would win is if this pipeline needed to run complex iterative algorithms (graph processing, ML feature engineering, multi-pass joins across massive denormalized tables) that BigQuery SQL cannot express efficiently. That is not this pipeline.
 
 ---
 
@@ -263,10 +265,12 @@ The dashboard is built in Looker Studio, connected directly to the BigQuery repo
 
 **1. Global Platform Throughput (Daily Ticks)**
 Vertical bar chart showing total tick volume per day across all categories. Gives a top-level view of how active the platform is over time.
+
 - Source: `fct_daily_category_activity`
 
 **2. Category Dominance (Total Volume)**
 Vertical bar chart of daily tick volume with a category filter dropdown. Allows drilling into a single category to see how its activity compares across time.
+
 - Source: `fct_daily_category_activity`
 
 ---
@@ -275,10 +279,12 @@ Vertical bar chart of daily tick volume with a category filter dropdown. Allows 
 
 **3. Ecosystem Liquidity Flows by Category**
 100% stacked area chart showing the relative share of tick volume per category over time. Reveals which categories are gaining or losing dominance on the platform.
+
 - Source: `fct_daily_category_activity`
 
 **4. Global Market Heartbeat (Hourly Spread Friction)**
 Combo chart overlaying average spread and tick count by hour. Shows the intraday rhythm of the platform — when markets are most active and how tight spreads are at each hour.
+
 - Source: `fct_spread_over_time`
 
 ---
@@ -287,13 +293,72 @@ Combo chart overlaying average spread and tick count by hour. Shows the intraday
 
 **5. Orderbook Quality Shifts (Spread Tiers)**
 100% stacked vertical bar chart bucketing daily spreads into three quality tiers: Tight (`< $0.02`), Medium (`$0.02–$0.05`), Wide (`> $0.05`). Tracks whether liquidity quality is improving or degrading over time.
+
 - Source: `fct_spread_distribution`
 
 **6. Individual Market Lifecycle (Price vs. Volume)**
 Combo chart showing YES average bid price and tick volume per day for a single market, selectable via a question filter dropdown. Useful for inspecting how a specific market's price evolves alongside its activity level.
+
 - Source: `fct_daily_market_history`
 
 ![Dashboard](images/dashboard.png)
+
+---
+
+## Cost & Scale Warning
+
+This section exists to set honest expectations before you run the pipeline. The data involved is large, the BigQuery scans are expensive at full table scale, and a single unconstrained run can cost real money.
+
+---
+
+### Raw data volume (GCS)
+
+Each hourly Parquet file for a single day of Polymarket orderbook data is between **586 MB and 706 MB**. A full 24-hour day lands **~15 GB of raw Parquet** in GCS:
+
+![Volume](images/gcs.png)
+
+---
+
+### Row counts
+
+A single day loaded into `staging.stg_orderbook` produces roughly **750 million rows**:
+
+```sql
+SELECT COUNT(*)
+FROM `polymarket-pipeline.staging.stg_orderbook`
+WHERE timestamp_received >= TIMESTAMP("2026-03-14 00:00:00")
+  AND timestamp_received < TIMESTAMP("2026-03-15 00:00:00")
+```
+
+```
+749,939,667 rows
+```
+
+That is approximately **31 million rows per hour** on average. After 9 days of pipeline runs, `stg_orderbook` contains:
+
+| Metric                     | Value         |
+| -------------------------- | ------------- |
+| Number of rows             | 4,904,719,534 |
+| Number of partitions       | 9             |
+| Total logical bytes        | 2.13 TB       |
+| Active logical bytes       | 2.13 TB       |
+| Current physical bytes     | 93.06 GB      |
+| Total physical bytes       | 105.73 GB     |
+| Time travel physical bytes | 12.67 GB      |
+
+The gap between logical (2.13 TB) and physical (105.73 GB) bytes reflects BigQuery's columnar compression. The pipeline reads from this table constantly — every transform and quality check scans it — which is why partition pruning and clustering are non-negotiable for cost control.
+
+---
+
+### Cost per day
+
+Running the full pipeline for a single day costs approximately **$10–15 USD** under BigQuery on-demand pricing ($6.25/TB scanned). The main cost drivers are:
+
+- `stg_price_changes`: scans one full date partition of `stg_orderbook` (~237 GB logical per day) to parse, filter, and flatten the JSON payload
+- Report assets: four fact tables each scan `stg_price_changes` for the target date
+- Quality checks: every `custom_check` query scans the loaded partition — these are scoped to `[start_date, end_date)` specifically to avoid billing for the full table
+
+Costs stay bounded as long as every WHERE clause leads with the partition column (`DATE(timestamp_received)` or `date`). Removing or bypassing a partition filter on any asset would scan the full 2.13 TB and cost ~$13 in a single query.
 
 ---
 
@@ -332,61 +397,6 @@ Final_Project/
     └── uv.lock
 ```
 
-## Cost & Scale Warning
-
-This section exists to set honest expectations before you run the pipeline. The data involved is large, the BigQuery scans are expensive at full table scale, and a single unconstrained run can cost real money.
-
----
-
-### Raw data volume (GCS)
-
-Each hourly Parquet file for a single day of Polymarket orderbook data is between **586 MB and 706 MB**. A full 24-hour day lands **~15 GB of raw Parquet** in GCS:
-
-![Volume](images/gcs.png)
-
----
-
-### Row counts
-
-A single day loaded into `staging.stg_orderbook` produces roughly **750 million rows**:
-
-```sql
-SELECT COUNT(*)
-FROM `polymarket-pulse-2026.staging.stg_orderbook`
-WHERE timestamp_received >= TIMESTAMP("2026-03-14 00:00:00")
-  AND timestamp_received < TIMESTAMP("2026-03-15 00:00:00")
-```
-
-```
-749,939,667 rows
-```
-
-That is approximately **31 million rows per hour** on average. After 9 days of pipeline runs, `stg_orderbook` contains:
-
-| Metric | Value |
-|---|---|
-| Number of rows | 4,904,719,534 |
-| Number of partitions | 9 |
-| Total logical bytes | 2.13 TB |
-| Active logical bytes | 2.13 TB |
-| Current physical bytes | 93.06 GB |
-| Total physical bytes | 105.73 GB |
-| Time travel physical bytes | 12.67 GB |
-
-The gap between logical (2.13 TB) and physical (105.73 GB) bytes reflects BigQuery's columnar compression. The pipeline reads from this table constantly — every transform and quality check scans it — which is why partition pruning and clustering are non-negotiable for cost control.
-
----
-
-### Cost per day
-
-Running the full pipeline for a single day costs approximately **$10–15 USD** under BigQuery on-demand pricing ($6.25/TB scanned). The main cost drivers are:
-
-- `stg_price_changes`: scans one full date partition of `stg_orderbook` (~237 GB logical per day) to parse, filter, and flatten the JSON payload
-- Report assets: four fact tables each scan `stg_price_changes` for the target date
-- Quality checks: every `custom_check` query scans the loaded partition — these are scoped to `[start_date, end_date)` specifically to avoid billing for the full table
-
-Costs stay bounded as long as every WHERE clause leads with the partition column (`DATE(timestamp_received)` or `date`). Removing or bypassing a partition filter on any asset would scan the full 2.13 TB and cost ~$13 in a single query.
-
 ---
 
 ## Cloud Setup (from scratch)
@@ -405,7 +415,7 @@ This section describes how to provision and run the entire pipeline in GCP with 
 
 Before touching Terraform or secrets, confirm you are working in the correct GCP context and that the required APIs are active.
 
-#### 1. Verify identity and project
+#### Verify identity and project
 
 **Via CLI:**
 
@@ -416,7 +426,7 @@ gcloud auth list
 
 **Via GCP Console:** Look at the top-left corner of the Cloud Console. Confirm the Project Dropdown shows your intended project. Click your Profile Icon (top-right) to verify the correct Google account is active.
 
-#### 2. Create the project and link billing
+#### Create the project and link billing
 
 A project and an active billing account are prerequisites for all resources.
 
@@ -424,22 +434,22 @@ A project and an active billing account are prerequisites for all resources.
 
 ```bash
 # Create the project
-gcloud projects create polymarket-pulse-2026 --name="Polymarket Pulse"
+gcloud projects create polymarket-pipeline --name="Polymarket Pipeline"
 
 # Link to your billing account (find your billing ID with 'gcloud billing accounts list')
-gcloud billing projects link polymarket-pulse-2026 \
+gcloud billing projects link polymarket-pipeline \
   --billing-account=XXXXXX-XXXXXX-XXXXXX
 
 # Check the active project
 gcloud config get-value project
 
 # Switch project if needed
-gcloud config set project polymarket-pulse-2026
+gcloud config set project polymarket-pipeline
 ```
 
-**Via GCP Console:** Go to `https://console.cloud.google.com/`, click **Project Picker (top left) → New Project**. Enter your project name and click Create. Then go to **Billing** in the side menu — if the project is not yet linked, click **Link a billing account** and select your active account.
+**Via GCP Console:** Go to `https://console.cloud.google.com/`, click **Project Picker (top left) → New Project**. Enter `Polymarket Pipeline` as the project name and click Create. Then go to **Billing** in the side menu — if the project is not yet linked, click **Link a billing account** and select your active account.
 
-#### 3. Enable required APIs
+#### Enable required APIs
 
 GCP services are off by default. You must enable each API this pipeline uses before Terraform can provision resources against them.
 
@@ -475,7 +485,7 @@ The pipeline runs under a dedicated service account with least-privilege IAM bin
 ```bash
 gcloud iam service-accounts create polymarket-sa \
   --display-name="Polymarket Pipeline SA" \
-  --project=polymarket-pulse-2026
+  --project=polymarket-pipeline
 ```
 
 **Via GCP Console:** Go to **IAM & Admin → Service Accounts → Create Service Account**. Enter `polymarket-sa` as the name, you can skip the optional role assignment (Terraform handles that) or add them manually.
@@ -493,7 +503,7 @@ Then download a JSON key:
 
 ```bash
 gcloud iam service-accounts keys create polymarket-sa.json \
-  --iam-account=polymarket-sa@polymarket-pulse-2026.iam.gserviceaccount.com
+  --iam-account=polymarket-sa@polymarket-pipeline.iam.gserviceaccount.com
 ```
 
 **Via GCP Console:** On the Service Accounts list, click the `polymarket-sa` account → **Keys tab → Add Key → Create new key → JSON → Create**. The file downloads automatically.
@@ -516,16 +526,16 @@ By storing both in Secret Manager, the VM bootstrap script can pull them at star
 ```bash
 # Upload service account credentials
 gcloud secrets create polymarket-credentials \
-  --data-file=./polimarket-sa.json \
-  --project=polymarket-pulse-2026
+  --data-file=./polymarket-sa.json \
+  --project=polymarket-pipeline
 
 # Upload Bruin connection config
 gcloud secrets create bruin-yml-config \
   --data-file=./.bruin.yml \
-  --project=polymarket-pulse-2026
+  --project=polymarket-pipeline
 ```
 
-**Via GCP Console:** Go to **Security → Secret Manager → Create Secret**. Enter `polymarket-credentials` as the name, upload `polimarket-sa.json` as the secret value, and click Create. Repeat for `bruin-yml-config` with `.bruin.yml`.
+**Via GCP Console:** Go to **Security → Secret Manager → Create Secret**. Enter `polymarket-credentials` as the name, upload `polymarket-sa.json` as the secret value, and click Create. Repeat for `bruin-yml-config` with `.bruin.yml`.
 
 To rotate credentials later, add a new version — the VM always reads the latest:
 
@@ -533,10 +543,10 @@ To rotate credentials later, add a new version — the VM always reads the lates
 
 ```bash
 gcloud secrets versions add polymarket-credentials \
-  --data-file=./new-polimarket-sa.json
+  --data-file=./new-polymarket-sa.json
 ```
 
-**Via GCP Console:** Go to **Secret Manager → bruin-gcp-credentials → New Version**, upload the new key file, and click Add New Version.
+**Via GCP Console:** Go to **Secret Manager → polymarket-credentials → New Version**, upload the new key file, and click Add New Version.
 
 ---
 
@@ -546,8 +556,8 @@ Update the `locals` block in `terraform/main.tf` with your project ID and servic
 
 ```hcl
 locals {
-  pipeline_sa_email = "polymarket-sa@polymarket-pulse-2026.iam.gserviceaccount.com"
-  project_id        = "polymarket-pulse-2026"
+  pipeline_sa_email = "polymarket-sa@polymarket-pipeline.iam.gserviceaccount.com"
+  project_id        = "polymarket-pipeline"
   ...
 }
 ```
@@ -625,10 +635,10 @@ Run the full pipeline for a specific date:
 ```bash
 docker run --rm \
   -v /opt/polymarket/.bruin.yml:/app/.bruin.yml:ro \
-  -v /opt/polymarket/bruin_gcp.json:/app/polymarket-sa.json:ro \
+  -v /opt/polymarket/polymarket-sa.json:/app/polymarket-sa.json:ro \
   -v /var/log/pipeline:/app/logs \
   jprq/polymarket-pipeline:latest \
-  --environment prod \
+  --environment dev \
   --start-date 2026-03-14 --end-date 2026-03-15
 ```
 
@@ -637,10 +647,10 @@ Run a backfill over multiple days:
 ```bash
 docker run --rm \
   -v /opt/polymarket/.bruin.yml:/app/.bruin.yml:ro \
-  -v /opt/polymarket/bruin_gcp.json:/app/polymarket-sa.json:ro \
+  -v /opt/polymarket/polymarket-sa.json:/app/polymarket-sa.json:ro \
   -v /var/log/pipeline:/app/logs \
   jprq/polymarket-pipeline:latest \
-  --environment prod \
+  --environment dev \
   --start-date 2026-03-14 --end-date 2026-03-20
 ```
 
@@ -649,16 +659,20 @@ Run a single asset (useful for debugging):
 ```bash
 docker run --rm \
   -v /opt/polymarket/.bruin.yml:/app/.bruin.yml:ro \
-  -v /opt/polymarket/bruin_gcp.json:/app/polymarket-sa.json:ro \
+  -v /opt/polymarket/polymarket-sa.json:/app/polymarket-sa.json:ro \
   -v /var/log/pipeline:/app/logs \
   --entrypoint bruin \
   jprq/polymarket-pipeline:latest \
   run ./polymarket-pipeline/assets/ingestion/upload_to_gcs.py \
-  --environment prod \
+  --environment dev \
   --start-date 2026-03-14 --end-date 2026-03-15
 ```
 
-> Note: Running a single asset requires overriding the entrypoint with `--entrypoint bruin` and passing the full `run <asset_path>` command manually, since the default entrypoint already includes `bruin run ./polymarket-pipeline`.
+> **Important Execution Notes:**
+> 
+> * **Production Executions:** If you are running the pipeline with `--environment prod`, Bruin triggers a safety confirmation prompt. You must add the **`-it`** flag to your Docker command (e.g., `docker run --rm -it ...`) to run the container interactively, allowing you to type `y` to confirm the prompt.
+> * **First-Time Runs:** If this is the very first time the pipeline is running (and the target BigQuery tables do not exist yet), append the **`--full-refresh`** flag to the end of your command.
+> * **Single Asset Execution:** Running a single asset requires overriding the image's entrypoint with `--entrypoint bruin` and passing the full `run <asset_path>` command manually, since the default entrypoint already includes `bruin run ./polymarket-pipeline`.
 
 ---
 
@@ -714,17 +728,17 @@ docker logs $(docker ps -lq)
 # Run the pipeline manually outside cron for immediate testing
 docker run --rm \
   -v /opt/polymarket/.bruin.yml:/app/.bruin.yml:ro \
-  -v /opt/polymarket/bruin_gcp.json:/app/polimarket-sa.json:ro \
+  -v /opt/polymarket/polymarket-sa.json:/app/polymarket-sa.json:ro \
   -v /var/log/pipeline:/app/logs \
   jprq/polymarket-pipeline:latest \
-  --environment prod
+  --environment dev
 ```
 
 **GCP connectivity**
 
 ```bash
 # Verify the VM can reach Secret Manager (useful after a credentials rotation)
-gcloud secrets versions access latest --secret=bruin-gcp-credentials
+gcloud secrets versions access latest --secret=polymarket-credentials
 
 # Verify the VM can reach GCS
 gsutil ls gs://polymarket-raw-parquet/raw/orderbook/
@@ -758,7 +772,7 @@ iostat -x 1   # Disk I/O — useful if uploads or BQ loads are unexpectedly slow
 
 ```bash
 # Verify the fetched credentials file is valid and contains the expected fields
-cat /opt/polymarket/polimarket-sa.json | jq '{project_id, client_email, type}'
+cat /opt/polymarket/polymarket-sa.json | jq '{project_id, client_email, type}'
 
 # Pretty-print any API response or Bruin output saved to a file
 cat some_response.json | jq .
@@ -790,7 +804,7 @@ gcloud auth list
 gcloud config get-value project
 
 # Switch if needed
-gcloud config set project polymarket-pulse-2026
+gcloud config set project polymarket-pipeline
 ```
 
 **Via GCP Console:** Check the Project Dropdown (top-left) and your Profile Icon (top-right) in the Cloud Console to confirm the correct project and account are active.
@@ -828,9 +842,13 @@ terraform apply
 After `terraform apply`, upload the secret values manually (Terraform provisions the containers but not the contents — see the terraform README for why):
 
 ```bash
-gcloud secrets versions add bruin-gcp-credentials   --data-file=./polymarket-sa.json   --project=polymarket-pulse-2026
+gcloud secrets versions add polymarket-credentials \
+  --data-file=./polymarket-sa.json \
+  --project=polymarket-pipeline
 
-gcloud secrets versions add bruin-yml-config   --data-file=./.bruin.yml   --project=polymarket-pulse-2026
+gcloud secrets versions add bruin-yml-config \
+  --data-file=./.bruin.yml \
+  --project=polymarket-pipeline
 ```
 
 ---
@@ -878,17 +896,17 @@ The service account needs the following IAM roles to run the full pipeline:
 ```bash
 # GCS access
 gcloud storage buckets add-iam-policy-binding gs://polymarket-raw-parquet \
-  --member="serviceAccount:polymarket-sa@polymarket-pulse-2026.iam.gserviceaccount.com" \
+  --member="serviceAccount:polymarket-sa@polymarket-pipeline.iam.gserviceaccount.com" \
   --role="roles/storage.objectAdmin"
 
 # BigQuery data access — granted at project level
-gcloud projects add-iam-policy-binding polymarket-pulse-2026 \
-  --member="serviceAccount:polymarket-sa@polymarket-pulse-2026.iam.gserviceaccount.com" \
+gcloud projects add-iam-policy-binding polymarket-pipeline \
+  --member="serviceAccount:polymarket-sa@polymarket-pipeline.iam.gserviceaccount.com" \
   --role="roles/bigquery.dataEditor"
 
 # BigQuery job execution
-gcloud projects add-iam-policy-binding polymarket-pulse-2026 \
-  --member="serviceAccount:polymarket-sa@polymarket-pulse-2026.iam.gserviceaccount.com" \
+gcloud projects add-iam-policy-binding polymarket-pipeline \
+  --member="serviceAccount:polymarket-sa@polymarket-pipeline.iam.gserviceaccount.com" \
   --role="roles/bigquery.jobUser"
 ```
 
@@ -896,7 +914,7 @@ gcloud projects add-iam-policy-binding polymarket-pulse-2026 \
 
 *GCS:* Go to **Cloud Storage → Buckets → polymarket-raw-parquet → Permissions → Grant Access**. Paste the service account email, select `Storage Object Admin`, and click Save.
 
-*BigQuery datasets:* Go to **BigQuery → Explorer → polymarket-pulse-2026 → staging** (three-dot menu) **→ Share → Manage permissions → Add principal**. Paste the service account email, select `BigQuery Data Editor`, and click Save. Repeat for the `reports` dataset.
+*BigQuery datasets:* Go to **BigQuery → Explorer → polymarket-pipeline → staging** (three-dot menu) **→ Share → Manage permissions → Add principal**. Paste the service account email, select `BigQuery Data Editor`, and click Save. Repeat for the `reports` dataset.
 
 *BigQuery jobs:* Go to **IAM & Admin → IAM → Grant Access**. Paste the service account email, select `BigQuery Job User`, and click Save.
 
@@ -919,7 +937,7 @@ environments:
       google_cloud_platform:
         - name: "bruin_gcp"
           service_account_file: "./polymarket-sa.json"
-          project_id: "polymarket-pulse-2026"
+          project_id: "polymarket-pipeline"
           location: "us-central1"
       gcs:
         - name: "bruin_gcs"
@@ -930,7 +948,7 @@ environments:
       google_cloud_platform:
         - name: "bruin_gcp"
           service_account_file: "./polymarket-sa.json"
-          project_id: "polymarket-pulse-2026"
+          project_id: "polymarket-pipeline"
           location: "us-central1"
       gcs:
         - name: "bruin_gcs"
@@ -960,6 +978,12 @@ bruin run ./polymarket-pipeline/assets/ingestion/upload_to_gcs.py \
   --start-date 2026-03-14 --end-date 2026-03-15
 ```
 
+> **Important Execution Notes:**
+
+> - **Production Executions:** If you run the pipeline with `--environment prod`, Bruin triggers a safety confirmation prompt. Since you are running this directly in the terminal, simply type `y` to confirm. *(Note: If you automate this specific command in a script without Docker, append `--force` to bypass the prompt).*
+
+> - **First-Time Runs:** If this is the very first time the pipeline is running (and the target BigQuery tables do not exist yet), append the **`--full-refresh`** flag to the end of your command.
+
 ---
 
 ### 7 — Verify the run
@@ -984,7 +1008,7 @@ bq query --nouse_legacy_sql \
    GROUP BY 1'
 ```
 
-**Via GCP Console:** Go to **BigQuery → Explorer → polymarket-pulse-2026 → staging → stg_orderbook → Preview**. Apply a filter on `timestamp_received` to verify rows for your target date are present.
+**Via GCP Console:** Go to **BigQuery → Explorer → polymarket-pipeline → staging → stg_orderbook → Preview**. Apply a filter on `timestamp_received` to verify rows for your target date are present.
 
 **Check that the report tables have data:**
 
@@ -996,7 +1020,7 @@ bq query --nouse_legacy_sql \
    GROUP BY 1'
 ```
 
-**Via GCP Console:** Go to **BigQuery → Explorer → polymarket-pulse-2026 → reports** and preview any `fct_*` table. If all assets ran successfully, each report table should have rows for your target date.
+**Via GCP Console:** Go to **BigQuery → Explorer → polymarket-pipeline → reports** and preview any `fct_*` table. If all assets ran successfully, each report table should have rows for your target date.
 
 ---
 
@@ -1042,14 +1066,14 @@ $today = Get-Date -Format "yyyy-MM-dd"
 $tomorrow = (Get-Date).AddDays(1).ToString("yyyy-MM-dd")
 docker run --rm `
   -v "${PWD}/.bruin.yml:/app/.bruin.yml:ro" `
-  -v "${PWD}/polymarket-sa.json:/app/bruin_gcp.json:ro" `
+  -v "${PWD}/polymarket-sa.json:/app/polymarket-sa.json:ro" `
   -v "${PWD}/logs:/app/logs" `
   jprq/polymarket-pipeline:latest `
   --environment prod --start-date $today --end-date $tomorrow
 
 # Upload secrets
-gcloud secrets versions add bruin-gcp-credentials --data-file=./polymarket-sa.json --project=polymarket-pulse-2026
-gcloud secrets versions add bruin-yml-config --data-file=./.bruin.yml --project=polymarket-pulse-2026
+gcloud secrets versions add polymarket-credentials --data-file=./polymarket-sa.json --project=polymarket-pipeline
+gcloud secrets versions add bruin-yml-config --data-file=./.bruin.yml --project=polymarket-pipeline
 
 # SSH into VM
 gcloud compute ssh polymarket-docker-host --zone=us-central1-a
@@ -1064,57 +1088,57 @@ gcloud compute ssh polymarket-docker-host --zone=us-central1-a --command="tail -
 
 #### Local development
 
-| Command | Description |
-|---|---|
-| `make install` | Install Python dependencies via `uv sync --frozen` |
-| `make validate` | Validate all pipeline assets without running them |
-| `make run` | Run the full pipeline for today |
-| `make run DATE=2026-03-14` | Run the full pipeline for a specific date |
-| `make backfill START=2026-03-14 END=2026-03-20` | Backfill a date range |
-| `make asset PATH=assets/ingestion/upload_to_gcs.py` | Run a single asset for today |
-| `make asset PATH=assets/... DATE=2026-03-14` | Run a single asset for a specific date |
+| Command                                             | Description                                        |
+| --------------------------------------------------- | -------------------------------------------------- |
+| `make install`                                      | Install Python dependencies via `uv sync --frozen` |
+| `make validate`                                     | Validate all pipeline assets without running them  |
+| `make run`                                          | Run the full pipeline for today                    |
+| `make run DATE=2026-03-14`                          | Run the full pipeline for a specific date          |
+| `make backfill START=2026-03-14 END=2026-03-20`     | Backfill a date range                              |
+| `make asset PATH=assets/ingestion/upload_to_gcs.py` | Run a single asset for today                       |
+| `make asset PATH=assets/... DATE=2026-03-14`        | Run a single asset for a specific date             |
 
 #### Docker
 
-| Command | Description |
-|---|---|
-| `make docker-build` | Build the Docker image locally |
-| `make docker-push` | Push the image to Docker Hub |
-| `make docker-run` | Run the pipeline in Docker using prod credentials (today) |
-| `make docker-run DATE=2026-03-14` | Run the pipeline in Docker for a specific date |
+| Command                           | Description                                               |
+| --------------------------------- | --------------------------------------------------------- |
+| `make docker-build`               | Build the Docker image locally                            |
+| `make docker-push`                | Push the image to Docker Hub                              |
+| `make docker-run`                 | Run the pipeline in Docker using prod credentials (today) |
+| `make docker-run DATE=2026-03-14` | Run the pipeline in Docker for a specific date            |
 
 #### Infrastructure
 
-| Command | Description |
-|---|---|
-| `make tf-init` | Initialize Terraform |
-| `make tf-plan` | Preview infrastructure changes |
-| `make tf-apply` | Apply infrastructure changes |
+| Command           | Description                                        |
+| ----------------- | -------------------------------------------------- |
+| `make tf-init`    | Initialize Terraform                               |
+| `make tf-plan`    | Preview infrastructure changes                     |
+| `make tf-apply`   | Apply infrastructure changes                       |
 | `make tf-destroy` | Destroy all infrastructure (asks for confirmation) |
 
 #### Secrets
 
-| Command | Description |
-|---|---|
-| `make upload-secrets` | Upload `polymarket-sa.json` + `.bruin.yml` to Secret Manager |
-| `make rotate-credentials` | Upload new key and re-fetch it on the VM without a reset |
+| Command                   | Description                                                  |
+| ------------------------- | ------------------------------------------------------------ |
+| `make upload-secrets`     | Upload `polymarket-sa.json` + `.bruin.yml` to Secret Manager |
+| `make rotate-credentials` | Upload new key and re-fetch it on the VM without a reset     |
 
 #### VM
 
-| Command | Description |
-|---|---|
-| `make ssh` | SSH into the pipeline VM |
-| `make logs` | Tail the cron log on the VM in real time |
-| `make vm-stop` | Stop the VM (saves compute cost, disk is retained) |
+| Command         | Description                                                 |
+| --------------- | ----------------------------------------------------------- |
+| `make ssh`      | SSH into the pipeline VM                                    |
+| `make logs`     | Tail the cron log on the VM in real time                    |
+| `make vm-stop`  | Stop the VM (saves compute cost, disk is retained)          |
 | `make vm-start` | Start the VM (cron resumes, startup script does not re-run) |
-| `make vm-reset` | Reset the VM and re-run the startup script |
+| `make vm-reset` | Reset the VM and re-run the startup script                  |
 
 #### Verify
 
-| Command | Description |
-|---|---|
-| `make check-gcs DATE=2026-03-14` | List GCS files for a date partition |
-| `make check-bq DATE=2026-03-14` | Count rows in `stg_orderbook` for a date |
+| Command                          | Description                              |
+| -------------------------------- | ---------------------------------------- |
+| `make check-gcs DATE=2026-03-14` | List GCS files for a date partition      |
+| `make check-bq DATE=2026-03-14`  | Count rows in `stg_orderbook` for a date |
 
 ---
 

@@ -2,7 +2,14 @@
 name: reports.fct_spread_over_time
 type: bq.sql
 connection: bruin_gcp
-description: "Calculates hourly time-series aggregations of market spreads and prices. Drives the intraday volatility and platform heartbeat charts."
+description: >
+  Calculates hourly time-series aggregations of market spreads and prices.
+  Drives the intraday volatility and platform heartbeat charts.
+  Grain: one row per (date, hour) — maximum 24 rows per date, one per
+  DATE_TRUNC(timestamp_received, HOUR) bucket.
+  yes_avg_bid and yes_avg_ask aggregate YES-side ticks only via conditional
+  aggregation — NULL for hours where no YES-side ticks were recorded.
+  avg_spread and tick_count cover all sides (YES + NO combined).
 materialization:
   type: table
   strategy: delete+insert
@@ -21,15 +28,15 @@ columns:
       - name: not_null
   - name: hour
     type: timestamp
-    description: "The specific hour block for this aggregation"
+    description: "Truncated to the start of the hour via DATE_TRUNC(timestamp_received, HOUR). e.g. 2026-03-14 07:00:00 UTC represents all ticks from 07:00 to 07:59."
     checks:
       - name: not_null
   - name: yes_avg_bid
     type: float
-    description: "Average YES best bid price during this hour"
+    description: "Average YES-side best_bid during this hour. NULL if no YES ticks were recorded in this hour bucket."
   - name: yes_avg_ask
     type: float
-    description: "Average YES best ask price during this hour"
+    description: "Average YES-side best_ask during this hour. NULL if no YES ticks were recorded in this hour bucket."
   - name: avg_spread
     type: float
     description: "Average bid-ask spread during this hour"
@@ -40,7 +47,7 @@ columns:
         value: 1.0
   - name: stddev_spread
     type: float
-    description: "Standard deviation of the spread during this hour"
+    description: "Standard deviation of spread across all ticks (YES + NO) during this hour. NULL if only one tick was recorded."
   - name: tick_count
     type: integer
     description: "Total number of price changes processed during this hour"

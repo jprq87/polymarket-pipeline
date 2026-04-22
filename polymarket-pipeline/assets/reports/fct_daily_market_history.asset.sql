@@ -2,7 +2,15 @@
 name: reports.fct_daily_market_history
 type: bq.sql
 connection: bruin_gcp
-description: "Provides a daily granular snapshot of volume, price action, and spread volatility at the individual market level. Includes time-series correlation for sentiment analysis."
+description: >
+  Provides a daily granular snapshot of volume, price action, and spread
+  volatility at the individual market level. Includes time-series correlation
+  for sentiment analysis.
+  Grain: one row per (date, market_id). Markets with no match in stg_markets
+  land with COALESCE defaults ('Market metadata unavailable', 'Unknown / Deleted'
+  etc.) via the LEFT JOIN — same pattern as fct_daily_category_activity.
+  price_trend_corr is NULL for markets with only one YES tick in the day, as
+  CORR() requires at least two distinct time values.
 materialization:
   type: table
   strategy: delete+insert
@@ -24,6 +32,27 @@ columns:
     description: "Polymarket condition ID"
     checks:
       - name: not_null
+  - name: question
+    type: string
+    description: "Market question text from stg_markets. Defaults to 'Market metadata unavailable' if no match."
+  - name: event_title
+    type: string
+    description: "Parent event title from stg_markets. Defaults to 'Unknown Event' if no match."
+  - name: category
+    type: string
+    description: "Category label from stg_markets. Defaults to 'Unknown / Deleted' if no match via LEFT JOIN."
+  - name: category_slug
+    type: string
+    description: "URL-safe category slug. Defaults to 'unknown-deleted' if no match."
+  - name: end_date
+    type: timestamp
+    description: "Market resolution deadline from stg_markets. NULL if not set."
+  - name: closed
+    type: boolean
+    description: "Whether the market is closed per stg_markets. NULL if no match."
+  - name: resolution_status
+    type: string
+    description: "UMA resolution status from stg_markets. NULL if unresolved or no match."
   - name: tick_count
     type: integer
     description: "Total number of price changes for this market on this day"
@@ -31,13 +60,19 @@ columns:
       - name: positive
   - name: yes_avg_bid
     type: float
-    description: "Average YES token bid price across the day"
+    description: "Average YES token bid price across the day."
   - name: yes_avg_ask
     type: float
-    description: "Average YES token ask price across the day"
+    description: "Average YES token ask price across the day."
+  - name: yes_min_bid
+    type: float
+    description: "Minimum YES token bid price recorded during the day."
+  - name: yes_max_ask
+    type: float
+    description: "Maximum YES token ask price recorded during the day."
   - name: avg_spread
     type: float
-    description: "Average bid-ask spread across the day"
+    description: "Average bid-ask spread across the day."
     checks:
       - name: non_negative
       - name: max
@@ -45,9 +80,19 @@ columns:
   - name: spread_volatility
     type: float
     description: "Standard deviation of the spread. High values indicate turbulent uncertainty."
+  - name: min_spread
+    type: float
+    description: "Tightest spread recorded for this market on this day."
+  - name: max_spread
+    type: float
+    description: "Widest spread recorded for this market on this day."
   - name: price_trend_corr
     type: float
-    description: "Pearson correlation between time and YES bid price. +1 = strong YES trend, -1 = strong NO trend."
+    description: >
+      Pearson correlation between UNIX_SECONDS(timestamp_received) and YES
+      best_bid, computed over all YES-side ticks in the day. +1 = monotonic
+      YES price increase across the day, -1 = monotonic decrease, ~0 = no
+      directional trend. NULL if fewer than two distinct YES ticks exist.
 
 custom_checks:
   - name: table is not empty for loaded dates

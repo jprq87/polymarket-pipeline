@@ -2,11 +2,59 @@
 name: staging.fetch_markets
 type: python
 image: python:3.12
-description: "Fetches market metadata from the Polymarket Gamma API concurrently and merges it into staging.dim_markets."
+description: >
+  Fetches market metadata from the Polymarket Gamma API concurrently and merges
+  it into staging.dim_markets.
+  Grain: one row per market_id (condition ID). Insert-only MERGE — existing rows
+  are never overwritten, making the table append-safe across backfills.
+  Ghost markets: market IDs the Gamma API cannot resolve are written with
+  is_ghost = TRUE to preserve referential integrity downstream. Filtered out in
+  stg_markets before any report joins.
+  Category resolution: canonical priority list of 8 known tag IDs
+  (Politics, Finance, Crypto, Sports, Games, Tech, Culture, Geopolitics).
+  Falls back to first non-rewards tag label if none match.
 secrets:
   - key: bruin_gcp
 depends:
   - staging.stg_orderbook
+
+columns:
+  - name: market_id
+    type: string
+    description: "Polymarket condition ID. Primary key — join target for all report assets via stg_markets."
+  - name: question
+    type: string
+    description: "Human-readable market question from the Gamma API. ASCII-sanitized."
+  - name: event_title
+    type: string
+    description: "Title of the parent event this market belongs to."
+  - name: category
+    type: string
+    description: >
+      Canonical category label. One of: Politics, Finance, Crypto, Sports,
+      Games, Tech, Culture, Geopolitics, or Unknown. Resolved via priority
+      list — see CANONICAL_PRIORITY in asset code.
+      Example: "Politics"
+  - name: category_slug
+    type: string
+    description: >
+      URL-safe slug for the category. Example: "pop-culture" for Culture,
+      "unknown" for unresolved markets.
+  - name: end_date
+    type: string
+    description: "Market resolution date in YYYY-MM-DD format. NULL if not provided by the API."
+  - name: closed
+    type: boolean
+    description: "Whether the market is closed at time of fetch."
+  - name: resolution_status
+    type: string
+    description: "UMA resolution status string from the API. NULL if unresolved or empty."
+  - name: is_ghost
+    type: boolean
+    description: >
+      TRUE if the Gamma API returned no data for this market_id. Ghost rows
+      exist solely to prevent broken foreign keys downstream. Filtered out
+      in stg_markets. A ghost ratio above 10% triggers a non-blocking warning.
 
 custom_checks:
   - name: dim_markets is not empty after merge

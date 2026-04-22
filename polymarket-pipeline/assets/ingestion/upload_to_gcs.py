@@ -2,7 +2,22 @@
 name: raw.upload_to_gcs
 type: python
 image: python:3.12
-description: "Streams pmxt hourly Parquet files into GCS without buffering the full file in memory. Source: https://r2.pmxt.dev/polymarket_orderbook_{YYYY-MM-DDTHH}.parquet. Files land at gs://polymarket-raw-parquet/raw/orderbook/date={date}/{hour}.parquet. Idempotent: skips any blob that already exists. Runs up to 4 concurrent uploads. Exits non-zero if any slot fails, blocking downstream stg_orderbook from running on incomplete data."
+description: >
+  Streams pmxt hourly Parquet files into GCS without buffering the full file
+  in memory.
+  Source: https://r2.pmxt.dev/polymarket_orderbook_{YYYY-MM-DDTHH}.parquet
+  Sink: gs://polymarket-raw-parquet/raw/orderbook/date={date}/{hour}.parquet
+  Grain: one file per hour per date partition. A full day produces 24 blobs
+  under date={YYYY-MM-DD}/. A multi-day backfill produces 24 * N blobs.
+  Idempotent: skips any blob that already exists in GCS — safe to re-run.
+  Runs up to 4 concurrent uploads. Exits non-zero if any slot fails, blocking
+  stg_orderbook from running on incomplete data.
+  Parquet schema (passthrough — not transformed):
+    timestamp_received   TIMESTAMP   When the update was received by the archiver
+    timestamp_created_at TIMESTAMP   When the update was created by Polymarket
+    market_id            STRING      Polymarket condition ID
+    update_type          STRING      price_change | book_snapshot
+    data                 STRING      Raw JSON orderbook payload
 secrets:
     - key: bruin_gcp
 @bruin"""

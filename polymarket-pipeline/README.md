@@ -1,6 +1,6 @@
 # polymarket-pipeline
 
-Bruin pipeline definition for the Polymarket Pulse project. This folder contains all pipeline assets, the pipeline configuration, and is the argument passed to `bruin run` at execution time.
+Bruin pipeline definition for the **Polymarket Pipeline** project. This folder contains all pipeline assets, the pipeline configuration, and is the argument passed to `bruin run` at execution time.
 
 ---
 
@@ -105,6 +105,7 @@ Streams hourly Parquet files from the pmxt archive (`https://r2.pmxt.dev/polymar
 
 Loads raw Parquet files from GCS into `staging.stg_orderbook` using BigQuery's `LOAD DATA INTO ... OVERWRITE PARTITIONS`. One partition per date.
 
+- Grain: one row per token per orderbook event — binary markets produce ~2x rows per event (YES + NO sides)
 - Partitioned by `DATE(timestamp_received)`, clustered by `market_id, update_type`
 - Partition-level idempotent: re-running the same date atomically replaces the partition
 - Supports multi-day backfills without any external state
@@ -117,6 +118,7 @@ Loads raw Parquet files from GCS into `staging.stg_orderbook` using BigQuery's `
 
 Parses the raw JSON `data` column using `JSON_VALUE()`, casts all fields to their correct types, and derives `spread = best_ask - best_bid`. Filters to `update_type = 'price_change'` only.
 
+- Grain: one row per token per price_change event — book_snapshot rows excluded
 - Partitioned by `date`, clustered by `market_id`
 - Incremental strategy: `delete+insert` on `date`
 - Data quality guards: probability bounds `[0, 1]`, side allowlist `{YES, NO}`, inverted market filter `ask >= bid`
@@ -133,6 +135,14 @@ Fetches market metadata from the Polymarket Gamma API (`https://gamma-api.polyma
 - Category resolution: canonical priority list of 8 known tag IDs; falls back to first non-rewards tag label
 - Ghost markets: IDs the API cannot resolve are written as `is_ghost = TRUE` to preserve referential integrity downstream
 - Upsert pattern: temp table → `MERGE` into `dim_markets` (insert-only, existing rows are never overwritten)
+
+---
+
+### `staging.dim_markets`
+
+**Type:** BigQuery table · **Populated by:** `staging.fetch_markets`
+
+Dimension table of market metadata. One row per `market_id`. Insert-only — existing rows are never overwritten. Ghost markets (`is_ghost = TRUE`) are included here but filtered out in `stg_markets`. Never query this directly downstream; use `stg_markets` instead.
 
 ---
 
@@ -172,7 +182,7 @@ Prefixed with `1.`, `2.`, `3.` to force correct sort order in Looker Studio. Par
 
 **Type:** BigQuery SQL · **Depends on:** `staging.stg_price_changes`, `staging.stg_markets`
 
-Daily aggregation of distinct market count, tick volume, and average spread grouped by category. Partitioned by `date`, clustered by `category`. Primary data source for the Macro View dashboard tile.
+Daily aggregation of distinct market count, tick volume, and average spread grouped by category. Partitioned by `date`, clustered by `category`.
 
 ---
 
@@ -218,6 +228,10 @@ bruin run ./polymarket-pipeline/assets/ingestion/upload_to_gcs.py \
 ```bash
 bruin validate ./polymarket-pipeline
 ```
+
+> **Important Execution Notes**:
+> - **First-Time Runs:** If this is the very first time the pipeline is running (and the target BigQuery tables do not exist yet), append the `--full-refresh` flag to the end of your command.
+> - **Docker & Production Environments:** If you adapt these commands to run inside a Docker container using `--environment prod`, Bruin will trigger a safety confirmation prompt. You must include the `-it` flag in your `docker run` command (e.g., `docker run --rm -it ...`) so you can interactively type `y` to confirm.
 
 ---
 
